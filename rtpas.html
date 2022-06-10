@@ -1,0 +1,880 @@
+<!doctype html>
+<html>
+	<head>
+		<title>Phased Array Simulator</title>
+	</head>
+
+	<body>
+		<table style="width:100%;">
+			<tr>
+				<td style="width: 1200px;">
+					<canvas width="1024" height="1024" id="playground">
+						Oh no! Your browser doesn't support canvas!
+					</canvas>
+				</td>
+				<td style="align: left; vertical-align: top;">
+					<br /><br /><br />
+
+					<p>Velicity: <input type="number" id="velocity_input" min="0" max="1000" value="300">
+						<select id="velocity_unit">
+							<option value="1">m/s</option>
+							<option value="1000">km/s</option>
+							<option value="1000000" selected="1">Mm/s</option>
+						</select>
+					</p>
+					<p>Frequency: <input type="number" id="frequency_input" min="0" max="1000" value="454"> 
+						<select id="frequency_unit">
+							<option value="1">Hz</option>
+							<option value="1000">kHz</option>
+							<option value="1000000">MHz</option>
+							<option value="1000000000">GHz</option>
+							<option value="1000000000000" selected="1">THz</option>
+						</select>
+					</p>
+					<p>Wavelength: <span id="wavelength_static"></span>
+						<select id="wavelength_unit">
+							<option value="0.000000001">nm</option>
+							<option value="0.000001">µm</option>
+							<option value="0.001">mm</option>
+							<option value="1">m</option>
+							<option value="1000">km</option>
+						</select>
+					</p><br />
+
+					<p>Begin Time: <input type="number" id="begin_time_input" min="0" value="0"> 
+						<select id="begin_time_unit">
+							<option value="0.000000000000001">fs</option>
+							<option value="0.000000000001">ps</option>
+							<option value="0.000000001">ns</option>
+							<option value="0.000001">µs</option>
+							<option value="0.001">ms</option>
+							<option value="1" selected="1">s</option>
+							<option value="60">min</option>
+						</select>
+					</p>
+					<p>End Time: <input type="number" id="end_time_input" min="0" value="20"> 
+						<select id="end_time_unit">
+							<option value="0.000000000000001">fs</option>
+							<option value="0.000000000001">ps</option>
+							<option value="0.000000001">ns</option>
+							<option value="0.000001">µs</option>
+							<option value="0.001">ms</option>
+							<option value="1" selected="1">s</option>
+							<option value="60">min</option>
+						</select>
+					</p>
+					<p>Time Scale: <input type="number" id="time_scale_input" min="1" value="10"> 
+						<select id="time_scale_unit">
+							<option value="0.000000000000001" selected="1">fs</option>
+							<option value="0.000000000001">ps</option>
+							<option value="0.000000001">ns</option>
+							<option value="0.000001">µs</option>
+							<option value="0.001">ms</option>
+							<option value="1">s</option>
+							<option value="60">min</option>
+						</select>
+						to 1s
+					</p><br /><br />
+
+					<input type="range" min="-90" max="90" value="0" id="angle_slider" style="width:360px"/>
+					<p>Angle: <span id="angle_static"></span></p><br/>
+
+					<input type="checkbox" id="need_focus" checked="checked"/>
+					<label for="need_focus">Need Focus</label><br/>
+					<input type="range" min="15" max="600" value="100" id="focal_slider" style="width:360px"/>
+					<p>Focal: <span id="focal_static"></span></p><br/>
+
+					<p>Number of Emitters: <input type="number" id="num_emitters_input" min="0" max="256" value="32"></p><br/>
+
+					<input type="range" min="4" max="128" value="16" id="pixels_per_wavelength_slider" style="width:360px"/>
+					<p>Pixels / wavelength: <span id="pixels_per_wavelength_static"></span></p><br/>
+
+					<input type="range" min="1" max="100" value="90" id="emitter_y_slider" style="width:360px"/>
+					<p>Emitter Y: <span id="emitter_y_static"></span></p><br/>
+
+					<p>Visualization Mode: 
+						<select id="visualization_mode">
+							<option value="0">Parula</option>
+							<option value="1">Red-Blue</option>
+							<option value="2">Strength</option>
+						</select>
+					</p>
+				</td>
+			</tr>
+		</div>
+	</body>
+
+	<script id="vertex_shader" type="x-shader/x-fragment">
+		precision highp float;
+		precision highp int;
+
+		uniform vec4 offset_scale;
+
+		attribute vec2 position;
+
+		varying vec2 texcoord;
+
+		void main()
+		{
+			texcoord = position * offset_scale.zw + offset_scale.xy;
+			vec2 pos_ss = texcoord * 2.0 - 1.0;
+			gl_Position = vec4(pos_ss.x, -pos_ss.y, 0.0, 1.0);
+		}
+	</script>
+
+	<script id="simulation_fragment_shader" type="x-shader/x-fragment">
+		precision highp float;
+		precision highp int;
+
+		const int EMITTER_BATCH_SIZE = 16;
+
+		uniform float d;
+		uniform float dx;
+		uniform float k;
+		uniform float start_phase;
+		uniform float propagate_distance_sq;
+		uniform int width;
+		uniform int height;
+		uniform float emitter_y;
+		uniform int num_emitters;
+		uniform int batch_emitter_start;
+		uniform int batch_num_emitters;
+		uniform float batch_emitter_phases[EMITTER_BATCH_SIZE];
+
+		varying vec2 texcoord;
+
+		float sqr(float x)
+		{
+			return x * x;
+		}
+
+		void main()
+		{
+			vec2 simulation_coord = vec2(floor(texcoord.x * float(width)), floor((1.0 - texcoord.y) * float(height)));
+			float value = 0.0;
+			if (simulation_coord.y < emitter_y)
+			{
+				for (int i = 0; i < EMITTER_BATCH_SIZE; ++i)
+				{
+					if (i >= batch_num_emitters)
+					{
+						break;
+					}
+
+					float dist_sq = sqr((simulation_coord.x - float(width / 2)) * dx - (float(i + batch_emitter_start) - float(num_emitters - 1) / 2.0) * d)
+						+ sqr((emitter_y - simulation_coord.y) * dx);
+					if (propagate_distance_sq >= dist_sq)
+					{
+						float dist = sqrt(dist_sq);
+						value += sin(k * dist - start_phase - batch_emitter_phases[i]) / (1.0 + dist_sq);
+					}
+				}
+			}
+
+			gl_FragColor = vec4(value, 0, 0, 0);
+		}
+	</script>
+
+	<script id="visualize_fragment_shader" type="x-shader/x-fragment">
+		precision highp float;
+		precision highp int;
+
+		uniform int num_emitters;
+		uniform int vis_mode;
+
+		uniform sampler2D simulation_sampler;
+		uniform sampler2D vis_sampler;
+
+		varying vec2 texcoord;
+
+		void main()
+		{
+			float strength = texture2D(simulation_sampler, texcoord).x / float(num_emitters);
+			if (vis_mode == 0)
+			{
+				gl_FragColor = texture2D(vis_sampler, vec2(strength * 0.5 + 0.5, 0.5));
+			}
+			else if (vis_mode == 1)
+			{
+				if (strength < 0.0)
+				{
+					gl_FragColor = vec4(0.0, 0.0, -strength, 1.0);
+				}
+				else
+				{
+					gl_FragColor = vec4(strength, 0.0, 0.0, 1.0);
+				}
+			}
+			else
+			{
+				strength = abs(strength);
+				gl_FragColor = vec4(strength, strength, strength, 1.0);
+			}				
+		}
+	</script>
+
+	<script id="emitter_fragment_shader" type="x-shader/x-fragment">
+		precision highp float;
+		precision highp int;
+
+		uniform vec4 color;
+
+		void main()
+		{
+			gl_FragColor = color;
+		}
+	</script>
+
+	<script>
+		class Config
+		{
+			constructor(width, height, num_emitters, pixels_per_wavelength, emitter_y, emitter_gap)
+			{
+				this.width = width;
+				this.height = height;
+
+				this.num_emitters = num_emitters;
+				this.pixels_per_wavelength = pixels_per_wavelength;
+				this.emitter_y = emitter_y;
+				this.emitter_gap = emitter_gap;
+			}
+		};
+
+		class Wave
+		{
+			constructor(velocity, frequency)
+			{
+				this.velocity = velocity;
+				this.frequency = frequency;
+				this.wavelength = velocity / frequency;
+			}
+		};
+
+		class Emitter
+		{
+			constructor(phase)
+			{
+				this.phase = phase;
+			}
+		};
+
+		function sqr(x)
+		{
+			return x * x;
+		}
+
+		function CreateShaderProgram(gl, vs_code, fs_code)
+		{
+			var vs = gl.createShader(gl.VERTEX_SHADER);
+			gl.shaderSource(vs, vs_code);
+			gl.compileShader(vs);
+
+			var fs = gl.createShader(gl.FRAGMENT_SHADER);
+			gl.shaderSource(fs, fs_code);
+			gl.compileShader(fs);
+
+			var shader_program = gl.createProgram();
+			gl.attachShader(shader_program, vs); 
+			gl.attachShader(shader_program, fs);
+			gl.linkProgram(shader_program);
+
+			gl.deleteShader(vs);
+			gl.deleteShader(fs);
+
+			return shader_program;
+		}
+
+		function ParulaColorMap()
+		{
+			// From https://github.com/BIDS/colormap/blob/master/parula.py
+			var color_map =
+			[
+				[0.2081, 0.1663, 0.5292],
+				[0.2116238095, 0.1897809524, 0.5776761905],
+				[0.212252381, 0.2137714286, 0.6269714286],
+				[0.2081, 0.2386, 0.6770857143],
+				[0.1959047619, 0.2644571429, 0.7279],
+				[0.1707285714, 0.2919380952, 0.779247619],
+				[0.1252714286, 0.3242428571, 0.8302714286],
+				[0.0591333333, 0.3598333333, 0.8683333333],
+				[0.0116952381, 0.3875095238, 0.8819571429],
+				[0.0059571429, 0.4086142857, 0.8828428571],
+				[0.0165142857, 0.4266, 0.8786333333],
+				[0.032852381, 0.4430428571, 0.8719571429],
+				[0.0498142857, 0.4585714286, 0.8640571429],
+				[0.0629333333, 0.4736904762, 0.8554380952],
+				[0.0722666667, 0.4886666667, 0.8467],
+				[0.0779428571, 0.5039857143, 0.8383714286],
+				[0.079347619, 0.5200238095, 0.8311809524],
+				[0.0749428571, 0.5375428571, 0.8262714286],
+				[0.0640571429, 0.5569857143, 0.8239571429],
+				[0.0487714286, 0.5772238095, 0.8228285714],
+				[0.0343428571, 0.5965809524, 0.819852381],
+				[0.0265, 0.6137, 0.8135],
+				[0.0238904762, 0.6286619048, 0.8037619048],
+				[0.0230904762, 0.6417857143, 0.7912666667],
+				[0.0227714286, 0.6534857143, 0.7767571429],
+				[0.0266619048, 0.6641952381, 0.7607190476],
+				[0.0383714286, 0.6742714286, 0.743552381],
+				[0.0589714286, 0.6837571429, 0.7253857143],
+				[0.0843, 0.6928333333, 0.7061666667],
+				[0.1132952381, 0.7015, 0.6858571429],
+				[0.1452714286, 0.7097571429, 0.6646285714],
+				[0.1801333333, 0.7176571429, 0.6424333333],
+				[0.2178285714, 0.7250428571, 0.6192619048],
+				[0.2586428571, 0.7317142857, 0.5954285714],
+				[0.3021714286, 0.7376047619, 0.5711857143],
+				[0.3481666667, 0.7424333333, 0.5472666667],
+				[0.3952571429, 0.7459, 0.5244428571],
+				[0.4420095238, 0.7480809524, 0.5033142857],
+				[0.4871238095, 0.7490619048, 0.4839761905],
+				[0.5300285714, 0.7491142857, 0.4661142857],
+				[0.5708571429, 0.7485190476, 0.4493904762],
+				[0.609852381, 0.7473142857, 0.4336857143],
+				[0.6473, 0.7456, 0.4188],
+				[0.6834190476, 0.7434761905, 0.4044333333],
+				[0.7184095238, 0.7411333333, 0.3904761905],
+				[0.7524857143, 0.7384, 0.3768142857],
+				[0.7858428571, 0.7355666667, 0.3632714286],
+				[0.8185047619, 0.7327333333, 0.3497904762],
+				[0.8506571429, 0.7299, 0.3360285714],
+				[0.8824333333, 0.7274333333, 0.3217],
+				[0.9139333333, 0.7257857143, 0.3062761905],
+				[0.9449571429, 0.7261142857, 0.2886428571],
+				[0.9738952381, 0.7313952381, 0.266647619],
+				[0.9937714286, 0.7454571429, 0.240347619],
+				[0.9990428571, 0.7653142857, 0.2164142857],
+				[0.9955333333, 0.7860571429, 0.196652381],
+				[0.988, 0.8066, 0.1793666667],
+				[0.9788571429, 0.8271428571, 0.1633142857],
+				[0.9697, 0.8481380952, 0.147452381],
+				[0.9625857143, 0.8705142857, 0.1309],
+				[0.9588714286, 0.8949, 0.1132428571],
+				[0.9598238095, 0.9218333333, 0.0948380952],
+				[0.9661, 0.9514428571, 0.0755333333],
+				[0.9763, 0.9831, 0.0538],
+			];
+
+			return color_map;
+		}
+
+		function CreateColorMapTexture(gl)
+		{
+			var color_map = ParulaColorMap();
+			var color_map_tex = gl.createTexture();
+			gl.bindTexture(gl.TEXTURE_2D, color_map_tex);
+			var pixel = new Uint8Array(color_map.length * 4);
+			for (var i = 0; i < color_map.length; ++i)
+			{
+				pixel[i * 4 + 0] = Math.min(Math.round(color_map[i][0] * 255), 255);
+				pixel[i * 4 + 1] = Math.min(Math.round(color_map[i][1] * 255), 255);
+				pixel[i * 4 + 2] = Math.min(Math.round(color_map[i][2] * 255), 255);
+				pixel[i * 4 + 3] = 255;
+			}
+
+			gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, color_map.length, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+			return color_map_tex;
+		}
+
+		class PhasedArraySimulator
+		{
+			constructor(gl)
+			{
+				this.gl = gl;
+
+				const vs_code = document.getElementById('vertex_shader').firstChild.nodeValue;
+				this.simulation_shader_program = CreateShaderProgram(gl,
+					vs_code, document.getElementById('simulation_fragment_shader').firstChild.nodeValue);
+				this.visualize_shader_program = CreateShaderProgram(gl,
+					vs_code, document.getElementById('visualize_fragment_shader').firstChild.nodeValue);
+				this.emitter_shader_program = CreateShaderProgram(gl,
+					vs_code, document.getElementById('emitter_fragment_shader').firstChild.nodeValue);
+
+				const positions = [0, 0, 0, 1, 1, 0, 1, 1];
+				this.vertex_buffer = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, this.vertex_buffer);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+				gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+				this.color_map_tex = CreateColorMapTexture(gl);
+
+				this.simulation_fb = gl.createFramebuffer();
+				this.simulation_tex = null;
+			}
+
+			Destroy()
+			{
+				const gl = this.gl;
+				gl.deleteProgram(this.simulation_shader_program);
+				gl.deleteProgram(this.visualize_shader_program);
+				gl.deleteProgram(this.emitter_shader_program);
+				gl.deleteBuffer(this.vertex_buffer);
+				gl.deleteTexture(this.color_map_tex);
+				gl.deleteTexture(this.simulation_tex);
+				gl.deleteFramebuffer(this.simulation_fb);
+			}
+
+			Update(config, wave)
+			{
+				this.config = config;
+				this.wave = wave;
+
+				const gl = this.gl;
+
+				if (this.simulation_tex != null)
+				{
+					gl.deleteTexture(this.simulation_tex);
+				}
+
+				this.simulation_tex = gl.createTexture();
+				gl.bindTexture(gl.TEXTURE_2D, this.simulation_tex);
+				gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, config.width, config.height, 0, gl.RED, gl.FLOAT, null);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+				gl.bindTexture(gl.TEXTURE_2D, null);
+
+				gl.bindFramebuffer(gl.FRAMEBUFFER, this.simulation_fb);
+				gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.simulation_tex, 0);
+				gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+			}
+
+			GenBeamformingEmitters(angle)
+			{
+				const config = this.config;
+				const wave = this.wave;
+
+				var d = wave.wavelength * config.emitter_gap;
+				var dphi = 2 * Math.PI * d * Math.sin(-angle * Math.PI / 180) / wave.wavelength;
+
+				var start_phase = 0;
+				if (angle < 0)
+				{
+					start_phase = -dphi * (config.num_emitters - 1);
+				}
+
+				var emitters = new Array();
+				for (var i = 0; i < config.num_emitters; ++i)
+				{
+					emitters.push(new Emitter(start_phase + dphi * i));
+				}
+
+				return emitters;
+			}
+
+			GenLensEmitters(angle, focal)
+			{
+				const config = this.config;
+				const wave = this.wave;
+
+				var d = wave.wavelength * config.emitter_gap;
+				var x0 = (config.num_emitters - 1) / 2.0 * d;
+				var dtheta = 2 * focal * Math.sin(-angle * Math.PI / 180);
+				var r_sq = sqr(focal) + sqr(x0) + dtheta * x0;
+				var r = Math.sqrt(r_sq);
+				var dphi = 2 * Math.PI / wave.wavelength;
+
+				var start_phase = 0;
+				if (angle > 0)
+				{
+					var l = Math.sqrt(sqr(focal) + sqr(x0) + dtheta * -x0);
+					start_phase = (r - l) * dphi;
+				}
+
+				var emitters = new Array();
+				for (var i = 0; i < config.num_emitters; ++i)
+				{
+					var x = (i - (config.num_emitters - 1) / 2.0) * d;
+					var l = Math.sqrt(sqr(focal) + sqr(x) + dtheta * x);
+					emitters.push(new Emitter(start_phase - (r - l) * dphi));
+				}
+
+				return emitters;
+			}
+
+			Simulate(emitters, time)
+			{
+				const gl = this.gl;
+				const config = this.config;
+				const wave = this.wave;
+				const vertex_buffer = this.vertex_buffer;
+				const simulation_shader_program = this.simulation_shader_program;
+				const simulation_tex = this.simulation_tex;
+				const simulation_fb = this.simulation_fb;
+
+				gl.viewport(0, 0, config.width, config.height);
+				gl.disable(gl.DEPTH_TEST);
+				gl.blendFunc(gl.ONE, gl.ONE);
+				gl.enable(gl.BLEND);
+				gl.clearColor(0, 0, 0, 0);
+				gl.bindFramebuffer(gl.FRAMEBUFFER, simulation_fb);
+
+				gl.useProgram(simulation_shader_program);
+
+				gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+				const position_loc = gl.getAttribLocation(simulation_shader_program, "position");
+				gl.vertexAttribPointer(position_loc, 2, gl.FLOAT, false, 0, 0);
+				gl.enableVertexAttribArray(position_loc);
+
+				const offset_scale_loc = gl.getUniformLocation(simulation_shader_program, "offset_scale");
+				gl.uniform4f(offset_scale_loc, 0.0, 0.0, 1.0, 1.0);
+
+				var d = wave.wavelength * config.emitter_gap;
+				var dx = wave.wavelength / config.pixels_per_wavelength;
+				var k = 2 * Math.PI / wave.wavelength;
+				var start_phase = wave.frequency * 2 * Math.PI * time;
+				var emitter_y_coord = Math.round(config.height * config.emitter_y);
+				var propagate_distance = wave.velocity * time;
+
+				const d_loc = gl.getUniformLocation(simulation_shader_program, "d");
+				const dx_loc = gl.getUniformLocation(simulation_shader_program, "dx");
+				const k_loc = gl.getUniformLocation(simulation_shader_program, "k");
+				const start_phase_loc = gl.getUniformLocation(simulation_shader_program, "start_phase");
+				const propagate_distance_sq_loc = gl.getUniformLocation(simulation_shader_program, "propagate_distance_sq");
+				const width_loc = gl.getUniformLocation(simulation_shader_program, "width");
+				const height_loc = gl.getUniformLocation(simulation_shader_program, "height");
+				const emitter_y_loc = gl.getUniformLocation(simulation_shader_program, "emitter_y");
+				const num_emitters_loc = gl.getUniformLocation(simulation_shader_program, "num_emitters");
+				const batch_emitter_start_loc = gl.getUniformLocation(simulation_shader_program, "batch_emitter_start");
+				const batch_num_emitters_loc = gl.getUniformLocation(simulation_shader_program, "batch_num_emitters");
+				const batch_emitter_phases_loc = gl.getUniformLocation(simulation_shader_program, "batch_emitter_phases");
+
+				gl.uniform1f(d_loc, d);
+				gl.uniform1f(dx_loc, dx);
+				gl.uniform1f(k_loc, k);
+				gl.uniform1f(start_phase_loc, start_phase);
+				gl.uniform1f(propagate_distance_sq_loc, propagate_distance * propagate_distance);
+				gl.uniform1i(width_loc, config.width);
+				gl.uniform1i(height_loc, config.height);
+				gl.uniform1f(emitter_y_loc, emitter_y_coord);
+				gl.uniform1i(num_emitters_loc, config.num_emitters);
+
+				gl.clear(gl.COLOR_BUFFER_BIT);
+
+				const EMITTER_BATCH_SIZE = 16;
+				var batch_emitter_phases = new Float32Array(EMITTER_BATCH_SIZE);
+				for (var i = 0; i < config.num_emitters; i += EMITTER_BATCH_SIZE)
+				{
+					gl.uniform1i(batch_emitter_start_loc, i);
+
+					var batch_num_emitters = Math.min(config.num_emitters - i, EMITTER_BATCH_SIZE);
+					gl.uniform1i(batch_num_emitters_loc, batch_num_emitters);
+
+					for (var j = 0; j < batch_num_emitters; ++j)
+					{
+						batch_emitter_phases[j] = emitters[i + j].phase;
+					}
+					gl.uniform1fv(batch_emitter_phases_loc, batch_emitter_phases);
+
+					gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+				}
+			}
+
+			VisualizeField(vis_mode)
+			{
+				const gl = this.gl;
+				const config = this.config;
+				const wave = this.wave;
+				const vertex_buffer = this.vertex_buffer;
+				const visualize_shader_program = this.visualize_shader_program;
+				const simulation_tex = this.simulation_tex;
+				const color_map_tex = this.color_map_tex;
+
+				gl.viewport(0, 0, config.width, config.height);
+				gl.disable(gl.DEPTH_TEST);
+				gl.disable(gl.BLEND);
+				gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+				gl.useProgram(visualize_shader_program);
+
+				const position_loc = gl.getAttribLocation(visualize_shader_program, "position");
+				gl.vertexAttribPointer(position_loc, 2, gl.FLOAT, false, 0, 0);
+				gl.enableVertexAttribArray(position_loc);
+
+				const offset_scale_loc = gl.getUniformLocation(visualize_shader_program, "offset_scale");
+				gl.uniform4f(offset_scale_loc, 0.0, 0.0, 1.0, 1.0);
+
+				const simulation_sampler_loc = gl.getUniformLocation(visualize_shader_program, 'simulation_sampler');
+				const vis_sampler_loc = gl.getUniformLocation(visualize_shader_program, 'vis_sampler');
+				const num_emitters_loc = gl.getUniformLocation(visualize_shader_program, "num_emitters");
+				const vis_mode_loc = gl.getUniformLocation(visualize_shader_program, "vis_mode");
+
+				gl.activeTexture(gl.TEXTURE0);
+				gl.bindTexture(gl.TEXTURE_2D, simulation_tex);
+				gl.uniform1i(simulation_sampler_loc, 0);
+
+				gl.activeTexture(gl.TEXTURE1);
+				gl.bindTexture(gl.TEXTURE_2D, color_map_tex);
+				gl.uniform1i(vis_sampler_loc, 1);
+				gl.uniform1i(num_emitters_loc, config.num_emitters);
+				gl.uniform1i(vis_mode_loc, vis_mode);
+
+				gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+			}
+
+			VisualizeEmitter(emitters)
+			{
+				const gl = this.gl;
+				const config = this.config;
+				const wave = this.wave;
+				const emitter_shader_program = this.emitter_shader_program;
+
+				gl.viewport(0, 0, config.width, config.height);
+				gl.disable(gl.DEPTH_TEST);
+				gl.disable(gl.BLEND);
+				gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+				gl.useProgram(emitter_shader_program);
+
+				const position_loc = gl.getAttribLocation(emitter_shader_program, "position");
+				gl.vertexAttribPointer(position_loc, 2, gl.FLOAT, false, 0, 0);
+				gl.enableVertexAttribArray(position_loc);
+
+				const offset_scale_loc = gl.getUniformLocation(emitter_shader_program, "offset_scale");
+				const color_loc = gl.getUniformLocation(emitter_shader_program, "color");
+
+				for (var i = 0; i < config.num_emitters; ++i)
+				{
+					var x = config.width / 2 + (i - (config.num_emitters - 1) / 2.0) * (config.pixels_per_wavelength * config.emitter_gap);
+					var y = config.height * config.emitter_y;
+
+					var length = emitters[i].phase / (2 * Math.PI) * config.pixels_per_wavelength;
+					var low_bound;
+					var high_bound;
+					var color;
+					if (length <= 0)
+					{
+						low_bound = 0;
+						high_bound = -length;
+						color = [0.0, 0.0, 1.0, 1.0];
+					}
+					else
+					{
+						low_bound = -length;
+						high_bound = 0;
+						color = [1.0, 0.0, 0.0, 1.0];
+					}
+
+					gl.uniform4f(offset_scale_loc, x / config.width, (y + low_bound) / config.height, 3.0 / config.width, (high_bound - low_bound + 1) / config.height);
+					gl.uniform4fv(color_loc, color);
+
+					gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+				}
+			}
+
+			Visualize(emitters, vis_mode)
+			{
+				this.VisualizeField(vis_mode);
+				this.VisualizeEmitter(emitters);
+			}
+		}
+
+		window.addEventListener("load", Startup, false);
+
+		var canvas;
+		var simulator;
+
+		var angle;
+		var begin_time;
+		var end_time;
+		var time_scale;
+
+		var velocity;
+		var frequency;
+
+		var num_emitters;
+		var pixels_per_wavelength;
+		var emitter_y;
+		var emitter_gap;
+
+		var vis_mode;
+
+		function UpdateWavelength()
+		{
+			var wavelength_static = document.getElementById("wavelength_static");
+			var wavelength_unit = document.getElementById("wavelength_unit");
+			wavelength_static.innerHTML = velocity / frequency / wavelength_unit.value;
+		}
+
+		function UpdateSimulator()
+		{
+			var wave = new Wave(velocity, frequency);
+			var config = new Config(canvas.width, canvas.height, num_emitters, pixels_per_wavelength, emitter_y, emitter_gap);
+
+			simulator.Update(config, wave);
+		}
+
+		function Startup()
+		{
+			emitter_gap = 0.25;
+
+			canvas = document.getElementById("playground");
+			var gl = canvas.getContext("webgl2");
+
+			gl.getExtension("EXT_color_buffer_float");
+			gl.getExtension("EXT_float_blend");
+
+			simulator = new PhasedArraySimulator(gl);
+
+			var velocity_input = document.getElementById("velocity_input");
+			var velocity_unit = document.getElementById("velocity_unit");
+			velocity_input.oninput = velocity_unit.onchange = function()
+			{
+				velocity = velocity_input.value * velocity_unit.value;
+				UpdateWavelength();
+				UpdateSimulator();
+			}
+			velocity_input.oninput();
+
+			var frequency_input = document.getElementById("frequency_input");
+			var frequency_unit = document.getElementById("frequency_unit");
+			frequency_input.oninput = frequency_unit.onchange = function()
+			{
+				frequency = frequency_input.value * frequency_unit.value;
+				UpdateWavelength();
+				UpdateSimulator();
+			}
+			frequency_input.oninput();
+
+			var wavelength_unit = document.getElementById("wavelength_unit");
+			wavelength_unit.onchange = function()
+			{
+				UpdateWavelength();
+				UpdateSimulator();
+			}
+			wavelength_unit.onchange();
+
+			var begin_time_input = document.getElementById("begin_time_input");
+			var begin_time_unit = document.getElementById("begin_time_unit");
+			begin_time_input.oninput = begin_time_unit.onchange = function()
+			{
+				begin_time = begin_time_input.value * begin_time_unit.value;
+				UpdateSimulator();
+			}
+			begin_time_input.oninput();
+
+			var end_time_input = document.getElementById("end_time_input");
+			var end_time_unit = document.getElementById("end_time_unit");
+			end_time_input.oninput = end_time_unit.onchange = function()
+			{
+				end_time = end_time_input.value * end_time_unit.value;
+				UpdateSimulator();
+			}
+			end_time_input.oninput();
+
+			var time_scale_input = document.getElementById("time_scale_input");
+			var time_scale_unit = document.getElementById("time_scale_unit");
+			time_scale_input.oninput = time_scale_unit.onchange = function()
+			{
+				time_scale = time_scale_input.value * time_scale_unit.value;
+				UpdateSimulator();
+			}
+			time_scale_input.oninput();
+
+			var angle_slider = document.getElementById("angle_slider");
+			var angle_static = document.getElementById("angle_static");
+			angle_slider.oninput = function()
+			{
+				angle = angle_slider.value;
+				angle_static.innerHTML = angle;
+				UpdateSimulator();
+			}
+			angle_slider.oninput();
+
+			var focal_slider = document.getElementById("focal_slider");
+			var focal_static = document.getElementById("focal_static");
+			focal_slider.oninput = function()
+			{
+				focal = focal_slider.value * 0.1;
+				focal_static.innerHTML = focal;
+				UpdateSimulator();
+			}
+			focal_slider.oninput();
+
+			var need_focus_checkbox = document.getElementById("need_focus");
+			need_focus_checkbox.onchange = function()
+			{
+				if (need_focus_checkbox.checked)
+				{
+					focal_slider.disabled = false;
+				}
+				else
+				{
+					focal_slider.disabled = true;
+				}
+			}
+			need_focus_checkbox.onchange();
+
+			var num_emitters_input = document.getElementById("num_emitters_input");
+			num_emitters_input.oninput = function()
+			{
+				num_emitters = num_emitters_input.value;
+				UpdateSimulator();
+			}
+			num_emitters_input.oninput();
+
+			var pixels_per_wavelength_slider = document.getElementById("pixels_per_wavelength_slider");
+			var pixels_per_wavelength_static = document.getElementById("pixels_per_wavelength_static");
+			pixels_per_wavelength_slider.oninput = function()
+			{
+				pixels_per_wavelength = pixels_per_wavelength_slider.value;
+				pixels_per_wavelength_static.innerHTML = pixels_per_wavelength;
+				UpdateSimulator();
+			}
+			pixels_per_wavelength_slider.oninput();
+
+			var emitter_y_slider = document.getElementById("emitter_y_slider");
+			var emitter_y_static = document.getElementById("emitter_y_static");
+			emitter_y_slider.oninput = function()
+			{
+				emitter_y = emitter_y_slider.value * 0.01;
+				emitter_y_static.innerHTML = emitter_y;
+				UpdateSimulator();
+			}
+			emitter_y_slider.oninput();
+
+			var visualization_mode_combo = document.getElementById("visualization_mode");
+			visualization_mode_combo.onchange = function()
+			{
+				vis_mode = visualization_mode_combo.value;
+			}
+			visualization_mode_combo.onchange();
+
+			RunSimulation(begin_time);
+		}
+
+		function RunSimulation(timestamp)
+		{
+			var emitters;
+			var need_focus_checkbox = document.getElementById("need_focus");
+			if (need_focus_checkbox.checked)
+			{
+				emitters = simulator.GenLensEmitters(angle, focal * simulator.wave.wavelength);
+			}
+			else
+			{
+				emitters = simulator.GenBeamformingEmitters(angle);
+			}
+
+			simulator.Simulate(emitters, timestamp);
+			simulator.Visualize(emitters, vis_mode);
+
+			window.requestAnimationFrame(function(current_time_ms)
+				{
+					var time = begin_time + current_time_ms * 0.001;
+					if (end_time > 0)
+					{
+						time = Math.min(time, end_time);
+					}
+
+					RunSimulation(time * time_scale);
+				}
+			);
+		}
+	</script>
+</html>
